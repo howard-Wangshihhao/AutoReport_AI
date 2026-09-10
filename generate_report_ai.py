@@ -71,6 +71,37 @@ JSON 格式：
 對 low / medium / high / critical risk，原則上必須輸出完整 cvss object；只有輸入內容完全不足以辨識漏洞或攻擊情境時才可設為 null。
 """
 
+CVSS_RETRY_SYSTEM_PROMPT = """你是一位 CVSS v3.1 Base Metrics 輔助判讀人員。
+
+你只需要針對已被人工判定為 low / medium / high / critical risk 的測項，依提供的測試事實重新判定完整的 CVSS v3.1 Base Metrics。
+
+規則：
+1. 只輸出 AV、AC、PR、UI、S、C、I、A 八個 Base Metrics。
+2. 不得為了配合人工風險等級而刻意調整 metrics。
+3. 不得把未提供的產品功能、攻擊結果、防護措施或漏洞細節寫成事實。
+4. 若資訊未逐字寫出，可依漏洞型態、攻擊路徑、存取位置、是否需要使用者互動與實際影響做 best-effort 判定。
+5. CVSS Base Metrics 描述漏洞固有特性，不應因額外防火牆、ACL、白名單等部署環境緩解措施而降低。
+6. 若漏洞成功利用前，必須由攻擊者以外的合法使用者執行必要動作（例如按實體按鈕啟用配對），UI 應優先考慮 R；若攻擊者可自行觸發必要流程，則 UI=N。不要用 AC:H 取代 UI:R。
+7. 僅在輸入內容完全無法辨識漏洞或攻擊情境時，才允許 cvss 為 null。
+8. 不要計算 score；Python 會依 FIRST CVSS v3.1 公式計算。
+9. 僅輸出 JSON object，不要 Markdown、code fence 或解釋。
+
+JSON 格式：
+{
+  "cvss": {
+    "AV": "N|A|L|P",
+    "AC": "L|H",
+    "PR": "N|L|H",
+    "UI": "N|R",
+    "S": "U|C",
+    "C": "N|L|H",
+    "I": "N|L|H",
+    "A": "N|L|H"
+  }
+}
+"""
+
+
 REQUIRED_HEADERS = ["編號", "測項", "判定結果", "目前情況", "Report", "Report_ch", "cvss", "score"]
 SKIP_RESULTS = {"tbd", "testing"}
 
@@ -85,6 +116,16 @@ def clean_text(value) -> str:
     if value is None:
         return ""
     return str(value).replace("\xa0", " ").strip()
+
+
+def call_gemini_generate_content(generate_content_func: Callable[..., object], **kwargs):
+    """呼叫 Gemini generate_content，隱藏 SDK 目前會誤顯示的 AFC 建議警告。"""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Direct use of automatic function calling \(AFC\) in Models\.generate_content.*",
+        )
+        return generate_content_func(**kwargs)
 
 
 def _display_width_units(text: str) -> float:
@@ -358,6 +399,62 @@ def parse_ai_payload(text: str) -> dict:
     return payload
 
 
+def build_cvss_retry_prompt(
+    *,
+    item_no: str,
+    test_item: str,
+    result: str,
+    current_status: str,
+    remediation: str = "",
+    reference_context: str = "",
+) -> str:
+    """第一輪 CVSS 缺失/格式錯誤時，使用更聚焦的 prompt 重試一次。"""
+    return f"""請重新判定此測項的 CVSS v3.1 Base Metrics。
+
+測項編號：{clean_text(item_no)}
+測試項目：{clean_text(test_item)}
+人工判定結果：{clean_text(result)}
+
+目前情況：
+{clean_text(current_status) or '(未提供)'}
+
+修補建議：
+{clean_text(remediation) or '(未提供)'}
+
+參考測項內容：
+{clean_text(reference_context) or '(無)'}
+
+請以 best-effort 方式輸出完整 AV、AC、PR、UI、S、C、I、A。
+不要輸出 score，也不要為了配合人工判定結果而調整 metrics。
+僅輸出 JSON object。
+"""
+
+
+def parse_cvss_retry_payload(text: str) -> dict | None:
+    """解析 CVSS 重試 API 的 JSON 回傳，只取 cvss object。"""
+    raw = clean_text(text)
+    if raw.startswith("```"):
+        raw = raw.removeprefix("```json").removeprefix("```").strip()
+        if raw.endswith("```"):
+            raw = raw[:-3].strip()
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first < 0 or last < first:
+        raise ValueError("CVSS 重試回傳內容不是有效 JSON object")
+    try:
+        payload = json.loads(raw[first:last + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"CVSS 重試 JSON 解析失敗：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("CVSS 重試 JSON 最外層必須是 object")
+    metrics = payload.get("cvss")
+    if metrics is None:
+        return None
+    if not isinstance(metrics, dict):
+        raise ValueError("CVSS 重試欄位 cvss 必須是 object 或 null")
+    return metrics
+
+
 def normalize_cvss_metrics(metrics: dict | None) -> dict:
     if not isinstance(metrics, dict):
         raise ValueError("CVSS Base Metrics 資訊不足或格式錯誤")
@@ -468,6 +565,44 @@ def set_cvss_cells_mismatch_style(ws, row_idx: int, cvss_col: int, score_col: in
         font = copy(cell.font)
         font.color = "FFFF0000"
         cell.font = font
+
+
+def copy_report_ch_style_to_report(ws, row_idx: int, report_col: int, report_ch_col: int) -> None:
+    """將同列 Report_ch 的完整儲存格格式複製到 Report；不修改任何儲存格內容。"""
+    report_cell = ws.cell(row_idx, report_col)
+    report_ch_cell = ws.cell(row_idx, report_ch_col)
+    report_cell.font = copy(report_ch_cell.font)
+    report_cell.fill = copy(report_ch_cell.fill)
+    report_cell.border = copy(report_ch_cell.border)
+    report_cell.alignment = copy(report_ch_cell.alignment)
+    report_cell.number_format = report_ch_cell.number_format
+    report_cell.protection = copy(report_ch_cell.protection)
+
+
+def format_output_cells(
+    ws,
+    row_idx: int,
+    report_col: int,
+    report_ch_col: int,
+    cvss_col: int,
+    score_col: int,
+) -> None:
+    """統一四個輸出欄位為 12pt、垂直置中、換行；保留既有字色（含 CVSS 紅字）。"""
+    # Report 先沿用 Report_ch 的完整基礎格式，維持雙語欄位一致。
+    copy_report_ch_style_to_report(ws, row_idx, report_col, report_ch_col)
+
+    for col_idx in (report_col, report_ch_col, cvss_col, score_col):
+        cell = ws.cell(row_idx, col_idx)
+
+        # copy() 後再改 size，可保留原本字型名稱、粗斜體、以及紅字等顏色資訊。
+        font = copy(cell.font)
+        font.sz = 12
+        cell.font = font
+
+        alignment = copy(cell.alignment)
+        alignment.vertical = "center"
+        alignment.wrap_text = True
+        cell.alignment = alignment
 
 
 def cvss_for_result(result: str, metrics: dict | None) -> tuple[str, float | str]:
@@ -977,7 +1112,8 @@ def make_recommendation_generator() -> Callable[..., str]:
         client = genai.Client(api_key=api_key)
 
         def generate_gemini_recommendation(**kwargs) -> str:
-            response = client.models.generate_content(
+            response = call_gemini_generate_content(
+                client.models.generate_content,
                 model=model,
                 contents=build_category_recommendation_prompt(**kwargs),
                 config=types.GenerateContentConfig(
@@ -1114,7 +1250,8 @@ def make_generator() -> Callable[..., str]:
         client = genai.Client(api_key=api_key)
 
         def generate_gemini(**kwargs) -> str:
-            response = client.models.generate_content(
+            response = call_gemini_generate_content(
+                client.models.generate_content,
                 model=model,
                 contents=build_prompt(**kwargs),
                 config=types.GenerateContentConfig(
@@ -1132,6 +1269,75 @@ def make_generator() -> Callable[..., str]:
     raise RuntimeError("AI_PROVIDER 僅支援 openai 或 gemini")
 
 
+def make_cvss_retry_generator() -> Callable[..., str]:
+    """建立僅用於 CVSS 第二次判讀的 API 呼叫器。"""
+    provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
+
+    if provider == "openai":
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError("尚未安裝 openai，請執行：pip install openai") from exc
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        model = os.getenv("OPENAI_MODEL", "").strip()
+        reasoning_effort = os.getenv("OPENAI_REASONING", "").strip()
+        if not api_key:
+            raise RuntimeError(".env 尚未設定 OPENAI_API_KEY")
+        if not model:
+            raise RuntimeError(".env 尚未設定 OPENAI_MODEL")
+        client = OpenAI(api_key=api_key)
+
+        def generate_openai_cvss_retry(**kwargs) -> str:
+            request = {
+                "model": model,
+                "instructions": CVSS_RETRY_SYSTEM_PROMPT,
+                "input": build_cvss_retry_prompt(**kwargs),
+                "store": False,
+            }
+            if reasoning_effort:
+                request["reasoning"] = {"effort": reasoning_effort}
+            response = client.responses.create(**request)
+            text = clean_text(response.output_text)
+            if not text:
+                raise RuntimeError("OpenAI API 未回傳 CVSS 重試內容")
+            return text
+
+        return generate_openai_cvss_retry
+
+    if provider == "gemini":
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise RuntimeError("尚未安裝 google-genai，請執行：pip install google-genai") from exc
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        model = os.getenv("GEMINI_MODEL", "").strip()
+        if not api_key:
+            raise RuntimeError(".env 尚未設定 GEMINI_API_KEY")
+        if not model:
+            raise RuntimeError(".env 尚未設定 GEMINI_MODEL")
+        client = genai.Client(api_key=api_key)
+
+        def generate_gemini_cvss_retry(**kwargs) -> str:
+            response = call_gemini_generate_content(
+                client.models.generate_content,
+                model=model,
+                contents=build_cvss_retry_prompt(**kwargs),
+                config=types.GenerateContentConfig(
+                    system_instruction=CVSS_RETRY_SYSTEM_PROMPT,
+                    temperature=0.1,
+                ),
+            )
+            text = clean_text(response.text)
+            if not text:
+                raise RuntimeError("Gemini API 未回傳 CVSS 重試內容")
+            return text
+
+        return generate_gemini_cvss_retry
+
+    raise RuntimeError("AI_PROVIDER 僅支援 openai 或 gemini")
+
+
 def process_workbook(
     *,
     input_path: Path | str,
@@ -1141,6 +1347,7 @@ def process_workbook(
     language: str,
     generate_func: Callable[..., str] | None = None,
     recommendation_generate_func: Callable[..., str] | None = None,
+    cvss_retry_func: Callable[..., str] | None = None,
     normalize_only: bool = False,
 ) -> dict:
     input_path = Path(input_path)
@@ -1179,6 +1386,7 @@ def process_workbook(
         skipped = 0
         failed = 0
         cvss_failed = 0
+        cvss_na = 0
 
         # 建立測項索引，讓「參考P06」這類文字能取得被引用列的上下文。
         row_context_by_id = {}
@@ -1243,6 +1451,47 @@ def process_workbook(
 
                 try:
                     vector, score = cvss_for_result(result, payload.get("cvss"))
+                except Exception as first_cvss_exc:
+                    kind = normalize_result_kind(result)
+                    if kind in {"low", "medium", "high", "critical"}:
+                        try:
+                            if cvss_retry_func is None:
+                                cvss_retry_func = make_cvss_retry_generator()
+                            print(
+                                f"  [CVSS RETRY] {item_no}: 第一輪 CVSS 不完整，重新判讀一次",
+                                file=sys.stderr, flush=True,
+                            )
+                            retry_raw = cvss_retry_func(
+                                item_no=item_no,
+                                test_item=test_item,
+                                result=result,
+                                current_status=current_status,
+                                remediation=remediation,
+                                reference_context=reference_context,
+                            )
+                            retry_metrics = parse_cvss_retry_payload(retry_raw)
+                            if retry_metrics is None:
+                                cvss_na += 1
+                                vector, score = "N/A", "-"
+                                print(
+                                    f"  [CVSS N/A] {item_no}: 目前資訊不足以辨識可供 CVSS v3.1 Base Metrics 評估的具體漏洞或攻擊情境",
+                                    file=sys.stderr, flush=True,
+                                )
+                            else:
+                                vector, score = cvss_for_result(result, retry_metrics)
+                        except Exception as retry_exc:
+                            cvss_failed += 1
+                            print(
+                                f"  [CVSS ERROR] {item_no}: 第一輪：{first_cvss_exc}；重試：{retry_exc}",
+                                file=sys.stderr, flush=True,
+                            )
+                            vector = score = None
+                    else:
+                        cvss_failed += 1
+                        print(f"  [CVSS ERROR] {item_no}: {first_cvss_exc}", file=sys.stderr, flush=True)
+                        vector = score = None
+
+                if vector is not None:
                     cvss_cell = ws.cell(row_idx, cvss_col)
                     score_cell = ws.cell(row_idx, score_col)
                     cvss_cell.value = vector
@@ -1256,10 +1505,6 @@ def process_workbook(
                         set_cvss_cells_mismatch_style(ws, row_idx, cvss_col, score_col, mismatch)
                         if warning:
                             print(f"  [CVSS WARNING] {item_no}: {warning}", file=sys.stderr, flush=True)
-                except Exception as cvss_exc:
-                    cvss_failed += 1
-                    # 保留既有 CVSS/score；若原本為空就維持空白，讓人工能快速辨識。
-                    print(f"  [CVSS ERROR] {item_no}: {cvss_exc}", file=sys.stderr, flush=True)
             except Exception as exc:
                 failed += 1
                 print(f"  [ERROR] {item_no}: {exc}", file=sys.stderr, flush=True)
@@ -1278,8 +1523,17 @@ def process_workbook(
                 if any(clean_text(ws.cell(auto_row_idx, col).value) for col in text_columns):
                     auto_adjust_row_height(
                         ws, auto_row_idx, text_columns,
-                        min_height=20.0, max_height=405.0, line_height=15.0, padding=6.0,
+                        min_height=20.0, max_height=405.0, line_height=18.0, padding=8.0,
                     )
+
+        # 自動列高完成後，再統一四個輸出欄位格式，避免列高函式把 Report 對齊改回靠上。
+        # cvss / score 只調整字級與對齊，保留既有字色，因此 mismatch 紅字不會被覆蓋。
+        if not normalize_only:
+            for format_row_idx in range(header_row + 1, ws.max_row + 1):
+                format_output_cells(
+                    ws, format_row_idx,
+                    report_col, report_ch_col, cvss_col, score_col,
+                )
 
         recommendation_stats = {"recommendation_generated": 0, "recommendation_failed": 0}
         if not normalize_only:
@@ -1300,6 +1554,7 @@ def process_workbook(
         "skipped": skipped,
         "failed": failed,
         "cvss_failed": cvss_failed,
+        "cvss_na": cvss_na,
         "restored_validations": restored_validations,
         "normalize_only": normalize_only,
         **recommendation_stats,
@@ -1371,6 +1626,8 @@ def main() -> int:
     print(f"產生 Report：{stats['generated']} 筆")
     print(f"略過：{stats['skipped']} 筆")
     print(f"失敗：{stats['failed']} 筆")
+    if stats.get("cvss_na"):
+        print(f"CVSS 不適用／資訊不足：{stats['cvss_na']} 筆")
     if stats.get("cvss_failed"):
         print(f"CVSS 需人工確認：{stats['cvss_failed']} 筆")
     if stats.get("recommendation_generated"):

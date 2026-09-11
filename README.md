@@ -1,89 +1,154 @@
 # AutoReport AI
 
-以 Excel 中人工填寫的「判定結果」與「目前情況」為基礎，呼叫 OpenAI 或 Gemini 產生資安檢測報告文字，並自動回填英文 `Report`、中文 `Report_ch`、CVSS v3.1 Vector、Score，以及分類層級的 `Security Recommendation`。
+AutoReport AI 是一套以 Excel 為輸入的資安檢測報告輔助產生工具，目前分為 **IoT 裝置檢測** 與 **OWASP MASTG 行動 App 檢測（Android / iOS）** 兩條流程。
 
-本工具設計原則為：**人工判定結果優先、AI 僅協助撰寫與 CVSS Base Metrics 判讀，不自行改變風險等級，也不應編造未提供的測試事實。**
+工具以檢測人員人工填寫的 **「判定結果」**、**「目前情況」** 與 **「修補建議」** 為主要依據，呼叫 AI 產生英文 `Report`、繁體中文 `Report_ch`、CVSS v3.1 Base Vector / Score，以及分類層級的 `Security Recommendation`。
 
----
-
-## 1. 功能摘要
-
-- 讀取既有 `.xlsx` 檢測表。
-- 依 `判定結果`、`目前情況`、`修補建議` 產生：
-  - 英文 `Report`
-  - 繁體中文 `Report_ch`
-- 支援 OpenAI 與 Google Gemini。
-- 對 Low / Medium / High / Critical 項目產生 CVSS v3.1 Base Metrics。
-- CVSS 第一輪資訊不完整時，自動進行一次專項重試。
-- 若兩次都無法合理判定 CVSS，不硬編 Metrics：
-  - `cvss = N/A`
-  - `score = -`
-- 對 None / No Risk 項目固定輸出 0.0。
-- 人工風險等級與 CVSS Severity 不一致時：
-  - 保留人工判定結果
-  - `cvss` 與 `score` 以紅字顯示，提醒人工複核
-- `Report / Report_ch / cvss / score` 統一：
-  - 字級 12 pt
-  - 垂直置中
-  - 自動換行
-- 依內容長度自動調整 Excel 列高。
-- 可建立 `Security Recommendation` 工作表，依大分類彙整 Low 以上項目並產生整體改善建議。
-- 支援 Excel x14 清單型 Data Validation 的轉換，避免 openpyxl 讀寫後下拉選單遺失。
-- 不需要安裝 Microsoft Excel 或 LibreOffice。
+> **設計原則：人工判定結果優先。AI 僅協助撰寫報告與判讀 CVSS Base Metrics，不自行改變人工風險等級，也不得編造未提供的測試事實。**
 
 ---
 
-## 2. 執行環境
+## 1. 專案結構
+
+目前目錄結構如下：
+
+```text
+AutoReport_AI/
+├─ templates/
+│  ├─ check_iot_ai.xlsx
+│  ├─ check_android_ai.xlsx
+│  └─ check_ios_ai.xlsx
+├─ .env
+├─ .gitignore
+├─ generate_iot_report_ai.py
+├─ generate_mastg_report_ai.py
+└─ README.md
+```
+
+各檔案用途：
+
+| 檔案 / 目錄 | 用途 |
+|---|---|
+| `generate_iot_report_ai.py` | 處理 IoT 裝置檢測 Excel |
+| `generate_mastg_report_ai.py` | 處理 OWASP MASTG Android / iOS Excel |
+| `templates/check_iot_ai.xlsx` | IoT 檢測範本 |
+| `templates/check_android_ai.xlsx` | Android MASTG 檢測範本 |
+| `templates/check_ios_ai.xlsx` | iOS MASTG 檢測範本 |
+| `.env` | AI Provider、模型與執行參數設定 |
+
+
+> `.env` 可能包含 API Key 或內部環境資訊，**不要提交到 GitHub**。
+
+---
+
+## 2. 支援的 AI Provider
+
+目前兩支程式可依 `.env` 切換 AI Provider：
+
+- **Ollama**：地端模型，適合機敏檢測資料
+- **OpenAI**
+- **Google Gemini**
+
+目前地端環境建議模型：
+
+```text
+gemma4:31b-it-q8_0
+```
+
+在目前 RTX 6000 Ada 48 GB 環境下，建議搭配：
+
+```text
+OLLAMA_NUM_CTX=8192
+OLLAMA_THINK=false
+```
+
+以避免不必要的大型 Context 佔用 VRAM，並使模型盡量維持 100% GPU 推論。
+
+---
+
+## 3. 執行環境
 
 建議使用 Python 3.10 以上版本。
 
-安裝共用套件：
+### 共用套件
 
 ```powershell
-pip install openpyxl python-dotenv
+pip install openpyxl python-dotenv requests
 ```
 
-使用 OpenAI：
+### 使用 OpenAI 時
 
 ```powershell
 pip install openai
 ```
 
-使用 Gemini：
+### 使用 Gemini 時
 
 ```powershell
 pip install google-genai
 ```
 
-也可以一次安裝：
+如需一次安裝全部 Provider：
 
 ```powershell
-pip install openpyxl python-dotenv openai google-genai
+pip install openpyxl python-dotenv requests openai google-genai
 ```
-
----
-
-## 3. 專案檔案
-
-最簡單的目錄結構如下：
-
-```text
-AutoReport_AI/
-├─ generate_report_ai.py
-├─ .env
-└─ check_iot_ai.xlsx
-```
-
-
-執行時使用實際檔名即可。
 
 ---
 
 ## 4. `.env` 設定
 
-`.env` 請放在 Python 程式相同目錄。
+`.env` 請放在兩支 Python 程式相同目錄。
 
-### 使用 Gemini
+### 4.1 建議的 Ollama 設定
+
+```env
+AI_PROVIDER=ollama
+
+# =========================
+# Ollama
+# =========================
+OLLAMA_HOST=http://192.168.50.241:11434
+OLLAMA_MODEL=gemma4:31b-it-q8_0
+OLLAMA_TIMEOUT=300
+OLLAMA_KEEP_ALIVE=10m
+OLLAMA_NUM_CTX=8192
+OLLAMA_THINK=false
+OLLAMA_STRUCTURED_OUTPUT=true
+
+# =========================
+# Excel
+# =========================
+SHEET_NAME=IOT Device
+REPORT_LANGUAGE=English
+OVERWRITE_REPORT=true
+```
+
+### 4.2 IoT 與 MASTG 可共用同一份 `.env`
+
+`SHEET_NAME=IOT Device` **可以保留，不需要在 IoT / MASTG 之間反覆修改**。
+
+- `generate_iot_report_ai.py` 會使用 `SHEET_NAME=IOT Device`
+- `generate_mastg_report_ai.py` 不使用此設定，會自動辨識：
+  - `Android App`
+  - `iOS App`
+
+因此同一天要跑 IoT、Android、iOS 時，可以直接共用同一份 `.env`。
+
+### 4.3 OpenAI 範例
+
+```env
+AI_PROVIDER=openai
+OPENAI_API_KEY=你的_API_Key
+OPENAI_MODEL=你的_OpenAI_模型名稱
+OPENAI_REASONING=
+
+SHEET_NAME=IOT Device
+REPORT_LANGUAGE=English
+OVERWRITE_REPORT=true
+```
+
+### 4.4 Gemini 範例
 
 ```env
 AI_PROVIDER=gemini
@@ -95,74 +160,117 @@ REPORT_LANGUAGE=English
 OVERWRITE_REPORT=true
 ```
 
-### 使用 OpenAI
-
-```env
-AI_PROVIDER=openai
-OPENAI_API_KEY=你的_API_Key
-OPENAI_MODEL=你的_OpenAI_模型名稱
-
-# 選填，例如 medium
-OPENAI_REASONING=
-
-SHEET_NAME=IOT Device
-REPORT_LANGUAGE=English
-OVERWRITE_REPORT=true
-```
-
-> `REPORT_LANGUAGE` 為相容既有設定保留。程式目前固定同時產生英文 `Report` 與繁體中文 `Report_ch`。
-
-### OVERWRITE_REPORT
-
-```env
-OVERWRITE_REPORT=true
-```
-
-表示重新執行時可覆寫既有 AI 產出的內容。
-
-若設為：
-
-```env
-OVERWRITE_REPORT=false
-```
-
-當該列的 Report、Report_ch、cvss、score 已完整存在時，會略過該列。
+> `REPORT_LANGUAGE` 為相容既有設定保留。目前程式固定同時產生英文 `Report` 與繁體中文 `Report_ch`。
 
 ---
 
-## 5. Excel 必要欄位
+## 5. 執行方式
 
-主工作表預設名稱：
+建議從專案根目錄執行。
 
-```text
-IOT Device
+### 5.1 IoT
+
+```powershell
+python generate_iot_report_ai.py templates\check_iot_ai.xlsx
 ```
 
-至少需要以下欄位：
+預設輸出：
+
+```text
+templates\check_iot_ai_report.xlsx
+```
+
+### 5.2 Android MASTG
+
+```powershell
+python generate_mastg_report_ai.py templates\check_android_ai.xlsx
+```
+
+預設輸出：
+
+```text
+templates\check_android_ai_report.xlsx
+```
+
+### 5.3 iOS MASTG
+
+```powershell
+python generate_mastg_report_ai.py templates\check_ios_ai.xlsx
+```
+
+預設輸出：
+
+```text
+templates\check_ios_ai_report.xlsx
+```
+
+### 5.4 自訂輸出檔名
+
+```powershell
+python generate_iot_report_ai.py templates\check_iot_ai.xlsx --output result_iot.xlsx
+```
+
+```powershell
+python generate_mastg_report_ai.py templates\check_android_ai.xlsx --output result_android.xlsx
+```
+
+### 5.5 MASTG 指定平台
+
+一般情況下程式會依工作表名稱自動判斷平台；如 Excel 同時含 Android 與 iOS 工作表，可手動指定：
+
+```powershell
+python generate_mastg_report_ai.py templates\check_android_ai.xlsx --platform android
+```
+
+或：
+
+```powershell
+python generate_mastg_report_ai.py templates\check_ios_ai.xlsx --platform ios
+```
+
+---
+
+## 6. IoT 與 MASTG 的差異
+
+| 項目 | IoT | MASTG |
+|---|---|---|
+| Python | `generate_iot_report_ai.py` | `generate_mastg_report_ai.py` |
+| 範本 | `check_iot_ai.xlsx` | `check_android_ai.xlsx` / `check_ios_ai.xlsx` |
+| 工作表 | `IOT Device` | `Android App` / `iOS App` |
+| 平台判斷 | `.env` 的 `SHEET_NAME` | 自動辨識 Android / iOS |
+| Android/iOS 測項過濾 | 不適用 | Android：S/D/F + MAxx；iOS：S/D/F + MIxx |
+| MASTG Hyperlink 測項名稱解析 | 不適用 | 支援 |
+| CVSS / Recommendation | 支援 | 支援 |
+
+---
+
+## 7. Excel 必要欄位
+
+IoT 與 MASTG 主表至少需要下列欄位：
 
 | 欄位 | 用途 |
 |---|---|
-| 編號 | 測項編號，例如 P06、S01 |
-| 測項 | 測試項目名稱 |
-| 判定結果 | 人工決定的最終風險結果 |
-| 目前情況 | 測試方式、測試結果、攻擊條件等事實 |
-| Report | AI 產生的英文報告 |
-| Report_ch | AI 產生的繁體中文報告 |
-| cvss | CVSS v3.1 Vector |
-| score | CVSS Base Score |
+| `編號` | 測項編號 |
+| `測項` | 測試項目名稱 |
+| `判定結果` | 檢測人員人工決定的風險結果 |
+| `目前情況` | 測試方法、結果、攻擊條件、限制條件等事實 |
+| `Report` | AI 產生的英文報告 |
+| `Report_ch` | AI 產生的繁體中文報告 |
+| `cvss` | CVSS v3.1 Base Vector |
+| `score` | CVSS Base Score |
 
 建議另外保留：
 
 | 欄位 | 用途 |
 |---|---|
-| 分類 | 用於 Security Recommendation 分類彙整 |
-| 修補建議 | 人工提供的改善方向，AI 可納入報告 |
+| `分類` | 用於 `Security Recommendation` 分類彙整 |
+| `修補建議` | 人工提供的改善方向，AI 可納入報告 |
 
 ---
 
-## 6. 建議的「目前情況」格式
+## 8. 「目前情況」建議格式
 
-為了讓 AI 更容易區分測試事實、攻擊條件與降低風險因素，可使用以下五段式結構：
+為了讓模型更容易區分事實、攻擊條件與降低風險因素，可視需要使用：
 
 ```text
 測試方式：
@@ -181,106 +289,45 @@ IOT Device
 - ...
 ```
 
-> **五段式為可選結構，不是每一段都必填。**
-> 請依測項實際取得的資訊填寫；沒有相關資訊時，可以直接省略該段，不需要為了格式完整而填入「不適用」、「未提供」或自行推測內容。
+此格式是 **可選**，不是每一段都必填。
 
-### 6.1 依判定結果建議填寫方式
+填寫原則：
 
-| 判定結果 | 建議填寫內容 |
-|---|---|
-| Not Applicable | 通常填「測試方式」與「不適用／未執行原因」即可 |
-| None / No Risk | 通常填「測試方式」與「測試結果」即可 |
-| Low / Medium / High / Critical | 建議至少描述「測試結果」；若有資料，再補「攻擊條件」、「可能影響」及「既有防護／限制條件」 |
-| Testing / TBD | 說明目前測試進度、尚缺資料或待確認事項即可 |
-
-### 6.2 撰寫原則
-
-- 一個 bullet 只描述一個事實。
-- `判定結果` 已有獨立欄位，因此「目前情況」以客觀測試事實為主，不必重複寫「因此判定為 Low」等結論。
-- 不確定的資訊不要推測。
-- 「攻擊條件」、「可能影響」、「既有防護／限制條件」只有在確實有資料時才填。
-- 特別是「既有防護／限制條件」，不要為了格式完整自行創造防護措施。
-- Low 以上若希望 AI 產生較合理的 CVSS，建議盡可能提供具體漏洞、攻擊路徑、是否需要鄰近／本地存取、是否需要使用者互動，以及 C/I/A 可能影響。
-- 若 Low 以上仍缺乏足以判定 CVSS Base Metrics 的具體漏洞或攻擊情境，程式會輸出 `cvss = N/A`、`score = -`，而不是硬編 Metrics。
-
-### 6.3 Not Applicable 範例
-
-不需要硬填五個段落，寫到能說明「為什麼本次沒有執行」即可：
-
-```text
-測試方式：
-- 本次未執行 Source Code Scanning。
-
-測試結果：
-- 因未提供本測項所需之原始碼資料，無法進行原始碼安全檢測。
-```
-
-不建議為了湊齊格式，再額外補：
-
-```text
-攻擊條件：
-- 不適用。
-
-可能影響：
-- 未提供。
-
-既有防護／限制條件：
-- 未提供。
-```
-
-這些段落沒有實質資訊時，直接省略即可。
-
-### 6.4 Low 以上範例
-
-若確實有攻擊情境與限制條件，可再使用完整結構：
-
-```text
-測試方式：
-- 針對 Bluetooth 配對與資料傳輸流程進行測試。
-
-測試結果：
-- 裝置採用 Just Works 配對方式，未使用 PIN/Passkey。
-
-攻擊條件：
-- 攻擊者需位於 Bluetooth 通訊範圍內。
-- 配對功能需由合法使用者按下實體按鈕後才會啟用。
-
-可能影響：
-- 配對期間可能存在未經充分身分驗證之連線風險。
-
-既有防護／限制條件：
-- Bluetooth 非持續開啟。
-- 敏感資料傳輸已有加密保護。
-```
-
+- 只寫實際取得的測試事實。
+- 沒有資訊的段落可直接省略。
+- 不需要為了格式完整填入「未提供」或「不適用」。
+- 不確定的產品能力、攻擊條件或防護措施不要推測。
+- Low 以上若希望 AI 產生較合理的 CVSS，建議盡量提供實際攻擊位置、權限需求、使用者互動與 C/I/A 影響。
 
 ---
 
-## 7. 判定結果處理
+## 9. 判定結果處理
 
-程式目前可辨識：
+程式可辨識：
 
-- Critical
-- High
-- Medium
-- Low
-- None / No Risk
-- Not Applicable / N/A
-- TBD
-- Testing
+```text
+Critical
+High
+Medium
+Low
+None / No Risk
+Not Applicable / N/A
+TBD
+Testing
+```
 
-其中：
+處理原則：
 
-- `TBD`、`Testing`：略過，不產生 Report。
-- `Not Applicable`：產生 N/A 類型報告，不要求 CVSS Base Metrics。
-- `None` / `No Risk`：產生無風險報告，score 固定為 0.0。
-- `Low` 以上：產生 Report 並進行 CVSS v3.1 Base Metrics 判讀。
+- `TBD` / `Testing`：略過，不產生 Report。
+- `Not Applicable`：產生 N/A 類型報告，不要求標準 CVSS Base Metrics。
+- `None / No Risk`：產生無風險報告，Score 固定為 `0.0`。
+- `Low / Medium / High / Critical`：產生 Report 並進行 CVSS v3.1 Base Metrics 判讀。
 
-人工填寫的 `判定結果` 是最終檢測結論，AI 不得自行改成其他風險等級。
+人工填寫的 `判定結果` 為最終檢測結論，AI 不會自行改變。
 
 ---
 
-## 8. CVSS v3.1 規則
+## 10. CVSS v3.1
 
 程式僅處理 CVSS v3.1 Base Metrics：
 
@@ -288,60 +335,37 @@ IOT Device
 AV / AC / PR / UI / S / C / I / A
 ```
 
-分數由 Python 依 Base Metrics 計算，不採用 AI 直接提供的 score。
+AI 負責判讀 Metrics，**Score 由 Python 依 CVSS v3.1 Base Score 公式計算**，不直接採用模型自行輸出的分數。
 
-### 8.1 Low 以上
+### Low 以上
 
-AI 第一輪會嘗試輸出完整 Metrics。
-
-若第一輪 Metrics 缺漏或格式錯誤：
+第一輪若 Metrics 缺漏或格式錯誤，程式會自動再進行一次 CVSS 專項重試。
 
 ```text
 [CVSS RETRY] Pxx: 第一輪 CVSS 不完整，重新判讀一次
 ```
 
-程式會再做一次專門的 CVSS 判讀。
-
-### 8.2 資訊仍不足
-
-若第二次仍無法合理辨識具體漏洞或攻擊情境，不會硬湊 CVSS：
-
-```text
-[CVSS N/A] S01: 目前資訊不足以辨識可供 CVSS v3.1 Base Metrics 評估的具體漏洞或攻擊情境
-```
-
-Excel 會寫入：
+若資訊仍不足以辨識具體漏洞或攻擊情境：
 
 ```text
 cvss  = N/A
 score = -
 ```
 
-這種情況常見於：
+避免硬編不存在的 CVSS Metrics。
 
-- 僅表示測試資料尚未提供完整。
-- 僅表示測試範圍不完整。
-- 沒有具體漏洞。
-- 沒有攻擊路徑。
-- 沒有可以判斷 C / I / A 的實際影響。
+### None / No Risk
 
-### 8.3 None / No Risk
-
-程式目前使用：
+目前工具使用自訂的無風險表示方式：
 
 ```text
 CVSS:3.1/AV:-/AC:-/PR:-/UI:-/S:-/C:N/I:N/A:N
+score = 0.0
 ```
 
-score：
+> `-` 不是 CVSS v3.1 官方 Base Vector 的標準 metric value，而是本工具為報告呈現所採用的自訂表示方式。
 
-```text
-0.0
-```
-
-> 注意：上述 `-` 並不是 CVSS v3.1 官方 Base Vector 的標準 metric value，而是本工具為報告呈現所採用的自訂「無風險」表示方式。
-
-### 8.4 Not Applicable
+### Not Applicable
 
 ```text
 cvss  = -
@@ -350,9 +374,9 @@ score = -
 
 ---
 
-## 9. 人工風險與 CVSS 不一致
+## 11. 人工風險與 CVSS Severity 不一致
 
-人工判定結果與 CVSS Base Severity 是兩個不同概念。
+人工風險判定與 CVSS Base Severity 是不同概念。
 
 例如人工判定：
 
@@ -360,311 +384,133 @@ score = -
 Low
 ```
 
-但 CVSS Base Score：
+但 Python 依 AI 提供的 Base Metrics 計算為：
 
 ```text
 4.3 Medium
 ```
 
-程式不會為了讓 CVSS 配合人工 Low 而修改 Metrics，而會顯示：
+程式會：
 
-```text
-[CVSS WARNING] P06: CVSS v3.1 計算結果為 4.3 (medium)，與人工判定結果 low risk 不一致；已保留人工判定並輸出 CVSS Base Score，請人工複核
-```
-
-Excel 中：
-
-- 人工 `判定結果` 不變。
-- `cvss` 與 `score` 以紅字提醒。
+- 保留人工 `判定結果`
+- 保留 CVSS 計算結果
+- 將 `cvss` 與 `score` 以紅字顯示
+- 在命令列輸出警告，提醒人工複核
 
 這是預期行為，不代表程式錯誤。
 
 ---
 
-## 10. CVSS 與環境控制的區分
+## 12. Security Recommendation
 
-CVSS Base Metrics 應描述漏洞本身的固有特性。
-
-例如以下環境控制通常不應直接拿來降低 Base Metrics：
-
-- Firewall
-- ACL
-- IP 白名單
-- 額外網路隔離
-- 特定部署限制
-
-這些因素可以作為人工整體風險判定的降低因素，但不一定改變 CVSS Base Score。
-
-另外，如果漏洞利用前必須由「攻擊者以外的合法使用者」先做必要操作，例如：
-
-```text
-必須由合法使用者按下實體按鈕後，才開啟 Bluetooth pairing
-```
-
-程式的 CVSS 重試 Prompt 會優先考慮：
-
-```text
-UI:R
-```
-
-而不是用 `AC:H` 取代使用者互動條件。
-
----
-
-## 11. Report 格式
-
-程式完成後會統一下列四個欄位：
-
-```text
-Report
-Report_ch
-cvss
-score
-```
-
-格式為：
-
-- 12 pt
-- 垂直置中
-- 自動換行
-
-其中：
-
-- `Report` 會先沿用 `Report_ch` 的儲存格格式，保持中英文版面一致。
-- `cvss` / `score` 僅調整字級與對齊，不覆蓋原本字色。
-- 因此 CVSS mismatch 的紅字會保留。
-
-列高會依 `目前情況`、`修補建議`、`Report`、`Report_ch` 的內容長度自動增加。
-
----
-
-## 12. 參考其他測項
-
-若「目前情況」中寫：
-
-```text
-參考 P06
-```
-
-或：
-
-```text
-參考P06
-refer to P06
-```
-
-程式會把 P06 的：
-
-- 測試項目
-- 判定結果
-- 目前情況
-
-一併提供給 AI 作為補充背景。
-
-但參考測項只提供上下文，不得改變本列人工判定結果。
-
----
-
-## 13. Security Recommendation
-
-程式會建立／重建：
+程式會建立或重建：
 
 ```text
 Security Recommendation
 ```
 
-工作表欄位：
+工作表主要欄位：
 
 | 欄位 | 說明 |
 |---|---|
-| 分類 | 例如 Static、Dynamic、Fuzzing、PT |
-| 最高風險 | 此分類中目前最高人工風險 |
+| 分類 | IoT 分類或 MASTG / MASVS Domain |
+| 最高風險 | 該分類目前最高人工風險 |
 | 觸發測項 | Low 以上的測項編號 |
 | Recommendation | 英文整體改善建議 |
 | Recommendation_ch | 中文整體改善建議 |
 
-只有 Low / Medium / High / Critical 的測項會觸發 AI 產生分類建議。
+只有 Low / Medium / High / Critical 項目會觸發 AI 產生分類建議。
 
-建議是「分類層級」的整體改善方向，而不是逐筆複製 Report。
-
-目前主要方向：
-
-- **Static**：SSDLC、Code Review、SAST/SCA、SBOM、第三方元件弱點管理、修補追蹤、release security gate。
-- **Dynamic**：動態測試、Runtime 行為、版本發布前回歸測試、異常行為驗證。
-- **Fuzzing**：Protocol、Parser、API、邊界輸入、Malformed Data、持續 Fuzzing 與回歸測試。
-- **PT**：依實際弱點聚焦 Attack Surface、Communication Security、Authentication、Authorization、Sensitive Data、Update、Physical Security 等。
+建議內容以「分類層級」的整體改善方向為主，不逐筆重複 Report。
 
 ---
 
-## 14. 執行方式
+## 13. MASTG 特別處理
 
-一般執行：
-
-```powershell
-python generate_report_ai.py check_iot_ai.xlsx
-```
-
-若你的檔名為：
+`generate_mastg_report_ai.py` 會自動依工作表名稱辨識平台：
 
 ```text
-generate_report_ai.py
+Android App
 ```
 
-則執行：
-
-```powershell
-python generate_report_ai.py check_iot_ai.xlsx
-```
-
-預設輸出：
+或：
 
 ```text
-Navi_report.xlsx
+iOS App
 ```
 
-### 自訂輸出檔名
+並依平台過濾測項：
 
-```powershell
-python generate_report_ai.py check_iot_ai.xlsx --output Navi_result.xlsx
-```
+- Android：共通 `Sxx / Dxx / Fxx` + `MAxx`
+- iOS：共通 `Sxx / Dxx / Fxx` + `MIxx`
 
-### 只處理 Excel x14 下拉選單
+因此 Android 檢測不會誤處理 `MIxx`，iOS 檢測也不會誤處理 `MAxx`。
 
-```powershell
-python generate_report_ai.py check_iot_ai.xlsx --normalize-only
-```
-
-此模式：
-
-- 不呼叫 AI
-- 不產生 Report
-- 只將 x14 Data Validation 轉為標準 Excel Data Validation
-
-預設輸出：
-
-```text
-Navi_template.xlsx
-```
+若 MASTG 測項名稱儲存在 Excel `HYPERLINK()` 公式中，程式會取出實際顯示名稱後再送給 AI，而不直接將整段公式作為測項名稱。
 
 ---
 
-## 15. 執行畫面範例
+## 14. Ollama 執行狀態確認
 
-正常處理：
+使用地端 Ollama 時，可在模型主機確認：
 
-```text
-[2] S01 Source code scanning (Low) ...
-[3] S02 SBOM Vulnerability Scanning (High) ...
-[11] P06 Network Security Test (Adjacent) (Low) ...
+```bash
+ollama ps
 ```
 
-CVSS 重試：
+目前建議看到類似：
 
 ```text
-[CVSS RETRY] S01: 第一輪 CVSS 不完整，重新判讀一次
+PROCESSOR   100% GPU
+CONTEXT     8192
 ```
 
-CVSS 不適用／資訊不足：
+搭配：
 
-```text
-[CVSS N/A] S01: 目前資訊不足以辨識可供 CVSS v3.1 Base Metrics 評估的具體漏洞或攻擊情境
+```bash
+nvidia-smi
 ```
 
-CVSS 與人工風險不一致：
+確認 GPU Utilization、VRAM 與功耗是否正常。
+
+程式執行時會顯示目前 Provider / Model / Host，例如：
 
 ```text
-[CVSS WARNING] P06: CVSS v3.1 計算結果為 4.3 (medium)，與人工判定結果 low risk 不一致；已保留人工判定並輸出 CVSS Base Score，請人工複核
+[AI] Provider: ollama
+[AI] Model: gemma4:31b-it-q8_0
+[AI] Host: http://192.168.50.241:11434
+[AI] Context: 8192
+[AI] Thinking: false
 ```
 
-完成時會顯示類似：
+每次 Ollama 呼叫也會輸出效能資訊，例如：
 
 ```text
-完成
-產生 Report：21 筆
-略過：3 筆
-失敗：0 筆
-CVSS 不適用／資訊不足：1 筆
-產生分類建議：2 類
+[OLLAMA PERF] P06 | total: 8.4s | load: 0.3s | prompt: 1620 tokens | output: 180 tokens | 25.1 tok/s
 ```
 
 ---
 
-## 16. 常見問題
+## 15. `.gitignore` 建議
 
-### Q1. 為什麼 Low Risk 的 CVSS 是 N/A？
+建議至少包含：
 
-因為人工 Low Risk 不一定代表已發現一個可以用 CVSS 評分的具體漏洞。
-
-例如：
-
-```text
-尚未取得完整 plugin source code，因此目前檢測範圍不完整
+```gitignore
+.env
+venv/
+__pycache__/
+*.pyc
+*_report.xlsx
+backup/
 ```
 
-這是一個人工評估上的風險或限制，但未必存在可以判定 AV / AC / PR / UI / S / C / I / A 的具體漏洞。
-
-因此程式會保留人工 `Low`，但將：
-
-```text
-cvss = N/A
-score = -
-```
-
-避免產生假的 CVSS。
-
-### Q2. 為什麼人工 Low，但 CVSS 是 Medium？
-
-人工整體風險可以考慮實際產品情境、既有控制、暴露程度與測試限制；CVSS Base Score 則主要描述漏洞本身的固有嚴重度。
-
-因此兩者不一致是允許的，程式會以紅字提醒人工複核。
-
-### Q3. 為什麼某列完全沒產生？
-
-請確認：
-
-- `判定結果` 是否有值。
-- `目前情況` 是否有值。
-- 判定結果是否為 `TBD` 或 `Testing`。
-- `OVERWRITE_REPORT=false` 時，該列是否已完整存在 Report / Report_ch / cvss / score。
-
-### Q4. Gemini 為什麼曾出現 AFC warning？
-
-程式目前已針對 Google GenAI SDK 的：
-
-```text
-Direct use of automatic function calling (AFC) in Models.generate_content...
-```
-
-提示進行過濾，避免在一般文字生成情境下干擾命令列輸出。
-
-### Q5. Excel 下拉選單為什麼需要 normalize？
-
-部分 Excel 使用 x14 Extended Data Validation。openpyxl 無法完整保留該延伸格式，因此程式會先讀取規則，再重建成標準 Data Validation，提高跨環境相容性。
+`templates/` 內若放的是乾淨範本，可以提交 GitHub；若範本含客戶資料，請先去識別化或不要提交。
 
 ---
 
-## 17. 使用原則
+## 16. 資料安全提醒
 
-本工具定位為：
-
-> **資安檢測報告文字與 CVSS Base Metrics 的輔助產生工具，而不是自動取代檢測工程師判定的工具。**
-
-建議正式交付前仍由檢測人員確認：
-
-- 判定結果是否正確。
-- Report 是否忠實反映實際測試。
-- AI 是否誤解「目前情況」。
-- CVSS Metrics 是否符合實際攻擊條件。
-- CVSS 與人工風險不一致是否有合理依據。
-- Recommendation 是否符合產品實際改善方向。
-
-尤其是 High / Critical、醫療器材、重要系統或其他高風險產品，CVSS 與報告內容應進行人工複核。
-
----
-
-## 18. 資料安全提醒
-
-若使用雲端 AI Provider，Excel 中送往模型的內容可能包含：
+若使用 OpenAI / Gemini 等雲端 Provider，送往模型的內容可能包含：
 
 - 測項名稱
 - 判定結果
@@ -672,14 +518,32 @@ Direct use of automatic function calling (AFC) in Models.generate_content...
 - 修補建議
 - 被引用測項內容
 
-因此不建議直接放入：
+因此不要直接放入：
 
 - 密碼
 - API Key
 - Token
 - 私鑰
-- 未遮罩的個資
-- 尚未核准上傳雲端的機敏程式碼或產品資訊
+- 未遮罩個資
+- 未核准上傳雲端的機敏程式碼或產品資訊
 
-若資料涉及客戶機密或受限制資訊，應先依組織政策確認是否可送至所選 AI Provider。
+若資料涉及客戶機密或受限制資訊，建議使用組織核准的地端 Ollama 環境，或依內部資料處理政策確認後再使用雲端模型。
 
+---
+
+## 17. 使用原則
+
+本工具定位為：
+
+> **資安檢測報告文字與 CVSS Base Metrics 的輔助產生工具，而不是取代檢測工程師判定的自動化決策工具。**
+
+正式交付前仍應由檢測人員確認：
+
+- 人工判定結果是否正確。
+- Report 是否忠實反映實際測試。
+- AI 是否誤解「目前情況」。
+- CVSS Metrics 是否符合實際攻擊條件。
+- CVSS 與人工風險不一致是否有合理依據。
+- Recommendation 是否符合產品實際改善方向。
+
+尤其是 High / Critical、醫療器材、重要系統或其他高風險產品，應進行完整人工複核。

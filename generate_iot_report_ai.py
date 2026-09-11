@@ -5,20 +5,22 @@
 
 特色：
 - Windows / Linux / macOS 可用。
+- AI provider 支援 OpenAI、Gemini，以及直接 HTTP 連線的 Ollama。
 - 只依賴 Python 套件，不需要安裝 Microsoft Excel 或 LibreOffice。
 - 若來源檔含 x14 的清單型資料驗證，會先轉成 openpyxl 可維護的標準 DataValidation。
 
 使用方式：
-    python generate_report_ai.py "D:\\path\\check_iot_ai.xlsx"
+    python generate_report_ai.py check_iot_ai.xlsx
 
 預設輸出：
-    check_iot_ai_report.xlsx
+    <input>_report.xlsx
 """
 
 from __future__ import annotations
 
 import argparse
 from copy import copy
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -101,6 +103,64 @@ JSON 格式：
 }
 """
 
+
+
+
+CVSS_METRICS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "AV": {"type": "string", "enum": ["N", "A", "L", "P"]},
+        "AC": {"type": "string", "enum": ["L", "H"]},
+        "PR": {"type": "string", "enum": ["N", "L", "H"]},
+        "UI": {"type": "string", "enum": ["N", "R"]},
+        "S": {"type": "string", "enum": ["U", "C"]},
+        "C": {"type": "string", "enum": ["N", "L", "H"]},
+        "I": {"type": "string", "enum": ["N", "L", "H"]},
+        "A": {"type": "string", "enum": ["N", "L", "H"]},
+    },
+    "required": ["AV", "AC", "PR", "UI", "S", "C", "I", "A"],
+    "additionalProperties": False,
+}
+
+REPORT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "report_en": {"type": "string"},
+        "report_zh": {"type": "string"},
+        "cvss": {
+            "anyOf": [
+                CVSS_METRICS_SCHEMA,
+                {"type": "null"},
+            ]
+        },
+    },
+    "required": ["report_en", "report_zh", "cvss"],
+    "additionalProperties": False,
+}
+
+CVSS_RETRY_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cvss": {
+            "anyOf": [
+                CVSS_METRICS_SCHEMA,
+                {"type": "null"},
+            ]
+        }
+    },
+    "required": ["cvss"],
+    "additionalProperties": False,
+}
+
+RECOMMENDATION_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "recommendation_en": {"type": "string"},
+        "recommendation_zh": {"type": "string"},
+    },
+    "required": ["recommendation_en", "recommendation_zh"],
+    "additionalProperties": False,
+}
 
 REQUIRED_HEADERS = ["編號", "測項", "判定結果", "目前情況", "Report", "Report_ch", "cvss", "score"]
 SKIP_RESULTS = {"tbd", "testing"}
@@ -199,6 +259,200 @@ def str_to_bool(value: str | None, default: bool = True) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+
+
+@dataclass(frozen=True)
+class OllamaConfig:
+    host: str
+    model: str
+    timeout: float
+    keep_alive: str
+    structured_output: bool
+    num_ctx: int
+    think: bool
+
+    @classmethod
+    def from_env(cls) -> "OllamaConfig":
+        host = os.getenv("OLLAMA_HOST", "").strip().rstrip("/")
+        model = os.getenv("OLLAMA_MODEL", "").strip()
+        if not host:
+            raise RuntimeError(".env 尚未設定 OLLAMA_HOST，例如 http://192.168.50.241:11434")
+        if not re.match(r"^https?://", host, re.IGNORECASE):
+            raise RuntimeError("OLLAMA_HOST 必須包含 http:// 或 https://")
+        if not model:
+            raise RuntimeError(".env 尚未設定 OLLAMA_MODEL")
+
+        raw_timeout = os.getenv("OLLAMA_TIMEOUT", "300").strip()
+        try:
+            timeout = float(raw_timeout)
+        except ValueError as exc:
+            raise RuntimeError(".env 的 OLLAMA_TIMEOUT 必須是數字") from exc
+        if timeout <= 0:
+            raise RuntimeError(".env 的 OLLAMA_TIMEOUT 必須大於 0")
+
+        raw_num_ctx = os.getenv("OLLAMA_NUM_CTX", "8192").strip()
+        try:
+            num_ctx = int(raw_num_ctx)
+        except ValueError as exc:
+            raise RuntimeError(".env 的 OLLAMA_NUM_CTX 必須是整數") from exc
+        if num_ctx <= 0:
+            raise RuntimeError(".env 的 OLLAMA_NUM_CTX 必須大於 0")
+
+        return cls(
+            host=host,
+            model=model,
+            timeout=timeout,
+            keep_alive=os.getenv("OLLAMA_KEEP_ALIVE", "10m").strip() or "10m",
+            structured_output=str_to_bool(
+                os.getenv("OLLAMA_STRUCTURED_OUTPUT", "true"), True
+            ),
+            num_ctx=num_ctx,
+            think=str_to_bool(os.getenv("OLLAMA_THINK", "false"), False),
+        )
+
+
+class OllamaBackend:
+    """直接透過 Ollama HTTP API 產生結構化回覆。"""
+
+    def __init__(self, config: OllamaConfig | None = None, session=None):
+        self.config = config or OllamaConfig.from_env()
+        self.model = self.config.model
+        self.timeout = self.config.timeout
+        self.keep_alive = self.config.keep_alive
+        self.structured_output = self.config.structured_output
+        self.num_ctx = self.config.num_ctx
+        self.think = self.config.think
+
+        if session is None:
+            try:
+                import requests
+            except ImportError as exc:
+                raise RuntimeError(
+                    "使用 AI_PROVIDER=ollama 需要 requests，請執行：pip install requests"
+                ) from exc
+            session = requests.Session()
+
+        self.session = session
+        # 內網 Ollama 通常不應經過系統 HTTP/HTTPS proxy。
+        if hasattr(self.session, "trust_env"):
+            self.session.trust_env = False
+
+    def chat(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: dict,
+        temperature: float,
+        label: str = "",
+    ) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "think": self.think,
+            "format": schema if self.structured_output else "json",
+            "options": {
+                "temperature": temperature,
+                "num_ctx": self.num_ctx,
+            },
+            "keep_alive": self.keep_alive,
+        }
+
+        response = None
+        try:
+            response = self.session.post(
+                f"{self.config.host}/api/chat",
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            detail = ""
+            if response is not None:
+                try:
+                    error_payload = response.json()
+                    if isinstance(error_payload, dict):
+                        detail = clean_text(error_payload.get("error"))
+                except Exception:
+                    detail = clean_text(getattr(response, "text", ""))
+            suffix = f"：{detail}" if detail else ""
+            raise RuntimeError(
+                f"Ollama API 呼叫失敗 ({self.config.host})；請確認主機可連線、Ollama 已啟動，"
+                f"且模型 {self.model} 已存在{suffix}"
+            ) from exc
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError("Ollama API 回傳內容不是有效 JSON") from exc
+
+        message = data.get("message") if isinstance(data, dict) else None
+        content = clean_text(message.get("content")) if isinstance(message, dict) else ""
+        if not content:
+            raise RuntimeError("Ollama API 未回傳 message.content")
+
+        total_ns = data.get("total_duration") if isinstance(data, dict) else None
+        load_ns = data.get("load_duration") if isinstance(data, dict) else None
+        prompt_count = data.get("prompt_eval_count") if isinstance(data, dict) else None
+        eval_count = data.get("eval_count") if isinstance(data, dict) else None
+        eval_ns = data.get("eval_duration") if isinstance(data, dict) else None
+
+        perf_parts = []
+        if isinstance(total_ns, (int, float)) and total_ns > 0:
+            perf_parts.append(f"total: {total_ns / 1_000_000_000:.1f}s")
+        if isinstance(load_ns, (int, float)) and load_ns > 0:
+            perf_parts.append(f"load: {load_ns / 1_000_000_000:.1f}s")
+        if isinstance(prompt_count, int):
+            perf_parts.append(f"prompt: {prompt_count} tokens")
+        if isinstance(eval_count, int):
+            perf_parts.append(f"output: {eval_count} tokens")
+        if (
+            isinstance(eval_count, int)
+            and isinstance(eval_ns, (int, float))
+            and eval_ns > 0
+        ):
+            perf_parts.append(f"{eval_count / (eval_ns / 1_000_000_000):.1f} tok/s")
+        if perf_parts:
+            perf_label = clean_text(label) or "request"
+            print(f"  [OLLAMA PERF] {perf_label} | " + " | ".join(perf_parts), flush=True)
+
+        return content
+
+    def close(self) -> None:
+        if self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = None
+
+
+_OLLAMA_BACKEND: OllamaBackend | None = None
+
+
+def get_ollama_backend() -> OllamaBackend:
+    global _OLLAMA_BACKEND
+    if _OLLAMA_BACKEND is None:
+        _OLLAMA_BACKEND = OllamaBackend()
+        print(
+            f"[OLLAMA] {_OLLAMA_BACKEND.config.host} | model={_OLLAMA_BACKEND.model} "
+            f"| ctx={_OLLAMA_BACKEND.num_ctx} | think={str(_OLLAMA_BACKEND.think).lower()}",
+            flush=True,
+        )
+    return _OLLAMA_BACKEND
+
+
+def close_ollama_backend() -> None:
+    global _OLLAMA_BACKEND
+    if _OLLAMA_BACKEND is not None:
+        _OLLAMA_BACKEND.close()
+        _OLLAMA_BACKEND = None
 
 
 def should_process(result: str, current_status: str, overwrite_report: bool, existing_report: str) -> bool:
@@ -1127,7 +1381,21 @@ def make_recommendation_generator() -> Callable[..., str]:
             return text
         return generate_gemini_recommendation
 
-    raise RuntimeError("AI_PROVIDER 僅支援 openai 或 gemini")
+    if provider == "ollama":
+        backend = get_ollama_backend()
+
+        def generate_ollama_recommendation(**kwargs) -> str:
+            return backend.chat(
+                system_prompt=RECOMMENDATION_SYSTEM_PROMPT,
+                user_prompt=build_category_recommendation_prompt(**kwargs),
+                schema=RECOMMENDATION_RESPONSE_SCHEMA,
+                temperature=0.2,
+                label=f"Recommendation:{clean_text(kwargs.get('category'))}",
+            )
+
+        return generate_ollama_recommendation
+
+    raise RuntimeError("AI_PROVIDER 僅支援 openai、gemini 或 ollama")
 
 
 def write_security_recommendation_sheet(wb, summaries: list[dict], recommendation_generate_func: Callable[..., str] | None) -> dict:
@@ -1266,7 +1534,21 @@ def make_generator() -> Callable[..., str]:
 
         return generate_gemini
 
-    raise RuntimeError("AI_PROVIDER 僅支援 openai 或 gemini")
+    if provider == "ollama":
+        backend = get_ollama_backend()
+
+        def generate_ollama(**kwargs) -> str:
+            return backend.chat(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=build_prompt(**kwargs),
+                schema=REPORT_RESPONSE_SCHEMA,
+                temperature=0.2,
+                label=clean_text(kwargs.get("item_no")),
+            )
+
+        return generate_ollama
+
+    raise RuntimeError("AI_PROVIDER 僅支援 openai、gemini 或 ollama")
 
 
 def make_cvss_retry_generator() -> Callable[..., str]:
@@ -1335,7 +1617,21 @@ def make_cvss_retry_generator() -> Callable[..., str]:
 
         return generate_gemini_cvss_retry
 
-    raise RuntimeError("AI_PROVIDER 僅支援 openai 或 gemini")
+    if provider == "ollama":
+        backend = get_ollama_backend()
+
+        def generate_ollama_cvss_retry(**kwargs) -> str:
+            return backend.chat(
+                system_prompt=CVSS_RETRY_SYSTEM_PROMPT,
+                user_prompt=build_cvss_retry_prompt(**kwargs),
+                schema=CVSS_RETRY_RESPONSE_SCHEMA,
+                temperature=0.1,
+                label=f"CVSS:{clean_text(kwargs.get('item_no'))}",
+            )
+
+        return generate_ollama_cvss_retry
+
+    raise RuntimeError("AI_PROVIDER 僅支援 openai、gemini 或 ollama")
 
 
 def process_workbook(
@@ -1570,7 +1866,20 @@ def main() -> int:
         return 1
 
     env_path = Path(__file__).resolve().with_name(".env")
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
+
+    provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
+    print(f"[CONFIG] .env: {env_path}")
+    print(f"[AI] Provider: {provider}")
+    if provider == "ollama":
+        print(f"[AI] Model: {os.getenv('OLLAMA_MODEL', '').strip()}")
+        print(f"[AI] Host: {os.getenv('OLLAMA_HOST', '').strip()}")
+        print(f"[AI] Context: {os.getenv('OLLAMA_NUM_CTX', '8192').strip()}")
+        print(f"[AI] Thinking: {os.getenv('OLLAMA_THINK', 'false').strip()}")
+    elif provider == "gemini":
+        print(f"[AI] Model: {os.getenv('GEMINI_MODEL', '').strip()}")
+    elif provider == "openai":
+        print(f"[AI] Model: {os.getenv('OPENAI_MODEL', '').strip()}")
 
     parser = argparse.ArgumentParser(description="AI 自動產生 Excel 資安檢測 Report")
     parser.add_argument("excel_path", help="輸入 Excel (.xlsx) 路徑")
@@ -1619,6 +1928,8 @@ def main() -> int:
     except Exception as exc:
         print(f"執行失敗：{exc}", file=sys.stderr)
         return 1
+    finally:
+        close_ollama_backend()
 
     print("\n完成")
     if stats["normalize_only"]:

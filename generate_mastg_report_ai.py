@@ -1002,6 +1002,23 @@ def report_structure_instruction(result: str, language: str) -> str:
 - 段落最後必須逐字使用：{conclusion}"""
 
 
+def report_opening_instruction(test_item: str) -> str:
+    """統一報告開場：先交代測項目的/範圍，再描述本次實際作法與結果。"""
+    item = clean_text(test_item) or "(未提供)"
+    return f"""【Report 開場規則】
+- 第一句必須先說明此測試項目的評估目的或範圍，再進入本次實際測試方式與結果。
+- 請依測試項目名稱「{item}」與測項類別，自然改寫成報告式開場，不要只重複測項名稱。
+- 英文第一句優先使用類似：This test item evaluated ... for security vulnerabilities / security controls.
+- 繁體中文第一句優先使用類似：本測試項目針對……進行安全弱點評估／安全性評估。
+- 第一個句子只是在交代測項目的或評估範圍，不代表已使用特定工具或完成特定攻擊。
+- 實際測試方式、工具、操作、觀察或確認方式，只能來自「目前情況」；若目前情況未提供，就不要自行補充。
+- 不得因測項名稱自行宣稱已執行特定工具、payload、掃描或攻擊手法。
+- Not Applicable 也必須先寫測項目的/範圍，再說明不適用或未執行原因。
+- None / No Risk 先寫測項目的/範圍，再寫實際確認方式與未發現風險的結果。
+- Low / Medium / High / Critical 先寫測項目的/範圍，再寫實際弱點、影響、限制條件與改善方向。
+"""
+
+
 REFERENCE_PATTERN = re.compile(r"(?:參考|参考|refer\s+to)\s*([A-Za-z]+\d+)", re.IGNORECASE)
 
 
@@ -1055,6 +1072,7 @@ def build_prompt(
     conclusion_zh = fixed_conclusion(result, "繁體中文")
     item_category = classify_test_item(test_item)
     item_template = test_item_template_instruction(test_item)
+    opening_rules = report_opening_instruction(test_item)
     kind = normalize_result_kind(result)
 
     if kind in {"low", "medium", "high", "critical"}:
@@ -1089,6 +1107,9 @@ MASVS Domain：{clean_text(mastg_domain) or '(共通測項)'}
 測項模板代碼：{item_category}
 {item_template}
 
+【Report 統一開場規則】
+{opening_rules}
+
 【英文 Report 規則】
 {structure_en}
 
@@ -1100,6 +1121,8 @@ MASVS Domain：{clean_text(mastg_domain) or '(共通測項)'}
 
 重要限制：
 - 人工判定結果必須維持為 {clean_text(result)}，不得自行變更。
+- 英文與繁體中文 Report 的第一句都必須先交代本測試項目的評估目的或範圍。
+- 第一個句子之後，再依「目前情況」描述本次實際測試方式、確認方式、觀察結果或風險；不得把測項名稱本身當成已執行的證據。
 - 英文固定結論句為：{conclusion_en}
 - 繁體中文固定結論句為：{conclusion_zh}
 - report_en 只放英文，不要加 English: 標籤。

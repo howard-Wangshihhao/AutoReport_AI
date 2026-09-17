@@ -10,7 +10,7 @@ AutoReport AI 是一套以 Excel 為輸入的資安檢測報告輔助產生工�
 
 ## 1. 專案結構
 
-目前目錄結構如下：
+目前目錄結構建議如下：
 
 ```text
 AutoReport_AI/
@@ -18,6 +18,7 @@ AutoReport_AI/
 │  ├─ check_iot_ai.xlsx
 │  ├─ check_android_ai.xlsx
 │  └─ check_ios_ai.xlsx
+├─ venv/
 ├─ .env
 ├─ .gitignore
 ├─ generate_iot_report_ai.py
@@ -34,8 +35,8 @@ AutoReport_AI/
 | `templates/check_iot_ai.xlsx` | IoT 檢測範本 |
 | `templates/check_android_ai.xlsx` | Android MASTG 檢測範本 |
 | `templates/check_ios_ai.xlsx` | iOS MASTG 檢測範本 |
+| `venv/` | Python 虛擬環境 |
 | `.env` | AI Provider、模型與執行參數設定 |
-
 
 > `.env` 可能包含 API Key 或內部環境資訊，**不要提交到 GitHub**。
 
@@ -43,26 +44,34 @@ AutoReport_AI/
 
 ## 2. 支援的 AI Provider
 
-目前兩支程式可依 `.env` 切換 AI Provider：
+目前兩支程式皆可依 `.env` 切換 AI Provider：
 
 - **Ollama**：地端模型，適合機敏檢測資料
 - **OpenAI**
 - **Google Gemini**
 
-目前地端環境建議模型：
+目前實際環境可穩定使用：
+
+```text
+qwen2.5:14b
+```
+
+若希望提高報告措辭、CVSS 判讀與複雜情境的穩定度，也可使用：
 
 ```text
 gemma4:31b-it-q8_0
 ```
 
-在目前 RTX 6000 Ada 48 GB 環境下，建議搭配：
+但目前環境曾觀察到 Ollama Server 載入 `gemma4:31b-it-q8_0` 時自動使用 `262144` context，造成 31B Q8 模型出現 CPU/GPU 混合 offload，推論速度大幅下降甚至 timeout。因此在 Server context 尚未能固定為較小值前，建議日常批次作業先使用 `qwen2.5:14b`。
+
+程式端仍建議設定：
 
 ```text
 OLLAMA_NUM_CTX=8192
 OLLAMA_THINK=false
 ```
 
-以避免不必要的大型 Context 佔用 VRAM，並使模型盡量維持 100% GPU 推論。
+> `OLLAMA_NUM_CTX` 會隨 `/api/chat` request 傳送，但實際 runner context 仍應以 `ollama ps` 顯示結果為準。
 
 ---
 
@@ -98,9 +107,9 @@ pip install openpyxl python-dotenv requests openai google-genai
 
 ## 4. `.env` 設定
 
-`.env` 請放在兩支 Python 程式相同目錄。
+`.env` 請放在兩支 Python 程式相同目錄。程式會使用該檔案，且以 `.env` 內容覆蓋同名的既有環境變數。
 
-### 4.1 建議的 Ollama 設定
+### 4.1 目前建議的 Ollama 設定
 
 ```env
 AI_PROVIDER=ollama
@@ -109,7 +118,8 @@ AI_PROVIDER=ollama
 # Ollama
 # =========================
 OLLAMA_HOST=http://192.168.50.241:11434
-OLLAMA_MODEL=gemma4:31b-it-q8_0
+OLLAMA_MODEL=qwen2.5:14b
+# OLLAMA_MODEL=gemma4:31b-it-q8_0
 OLLAMA_TIMEOUT=300
 OLLAMA_KEEP_ALIVE=10m
 OLLAMA_NUM_CTX=8192
@@ -214,6 +224,8 @@ python generate_iot_report_ai.py templates\check_iot_ai.xlsx --output result_iot
 python generate_mastg_report_ai.py templates\check_android_ai.xlsx --output result_android.xlsx
 ```
 
+程式不允許輸出路徑與原始 Excel 相同，以避免覆蓋原始檢測資料。
+
 ### 5.5 MASTG 指定平台
 
 一般情況下程式會依工作表名稱自動判斷平台；如 Excel 同時含 Android 與 iOS 工作表，可手動指定：
@@ -228,6 +240,28 @@ python generate_mastg_report_ai.py templates\check_android_ai.xlsx --platform an
 python generate_mastg_report_ai.py templates\check_ios_ai.xlsx --platform ios
 ```
 
+### 5.6 只標準化 Excel，不呼叫 AI
+
+兩支程式皆支援：
+
+```powershell
+--normalize-only
+```
+
+例如：
+
+```powershell
+python generate_mastg_report_ai.py templates\check_android_ai.xlsx --normalize-only
+```
+
+此模式只將來源 Excel 中的 x14 清單型 Data Validation 轉為較適合 openpyxl 維護的標準 Data Validation，不產生 Report，也不呼叫 AI。
+
+預設輸出會改為：
+
+```text
+<input>_template.xlsx
+```
+
 ---
 
 ## 6. IoT 與 MASTG 的差異
@@ -239,7 +273,8 @@ python generate_mastg_report_ai.py templates\check_ios_ai.xlsx --platform ios
 | 工作表 | `IOT Device` | `Android App` / `iOS App` |
 | 平台判斷 | `.env` 的 `SHEET_NAME` | 自動辨識 Android / iOS |
 | Android/iOS 測項過濾 | 不適用 | Android：S/D/F + MAxx；iOS：S/D/F + MIxx |
-| MASTG Hyperlink 測項名稱解析 | 不適用 | 支援 |
+| MASTG HYPERLINK 測項名稱解析 | 不適用 | 支援 |
+| MASVS Domain | 不適用 | 支援分類彙整 |
 | CVSS / Recommendation | 支援 | 支援 |
 
 ---
@@ -253,7 +288,7 @@ IoT 與 MASTG 主表至少需要下列欄位：
 | `編號` | 測項編號 |
 | `測項` | 測試項目名稱 |
 | `判定結果` | 檢測人員人工決定的風險結果 |
-| `目前情況` | 測試方法、結果、攻擊條件、限制條件等事實 |
+| `目前情況` | 測試方式、結果、攻擊條件、既有防護／限制條件等事實 |
 | `Report` | AI 產生的英文報告 |
 | `Report_ch` | AI 產生的繁體中文報告 |
 | `cvss` | CVSS v3.1 Base Vector |
@@ -266,11 +301,13 @@ IoT 與 MASTG 主表至少需要下列欄位：
 | `分類` | 用於 `Security Recommendation` 分類彙整 |
 | `修補建議` | 人工提供的改善方向，AI 可納入報告 |
 
+若 `判定結果` 或 `目前情況` 為空，該列不會進行 AI Report 產生。
+
 ---
 
 ## 8. 「目前情況」建議格式
 
-為了讓模型更容易區分事實、攻擊條件與降低風險因素，可視需要使用：
+目前建議統一使用以下四段：
 
 ```text
 測試方式：
@@ -282,26 +319,71 @@ IoT 與 MASTG 主表至少需要下列欄位：
 攻擊條件：
 - ...
 
-可能影響：
-- ...
-
 既有防護／限制條件：
 - ...
 ```
 
-此格式是 **可選**，不是每一段都必填。
-
 填寫原則：
 
-- 只寫實際取得的測試事實。
-- 沒有資訊的段落可直接省略。
-- 不需要為了格式完整填入「未提供」或「不適用」。
-- 不確定的產品能力、攻擊條件或防護措施不要推測。
-- Low 以上若希望 AI 產生較合理的 CVSS，建議盡量提供實際攻擊位置、權限需求、使用者互動與 C/I/A 影響。
+- **測試方式**：實際如何檢查、觀察、掃描、操作或驗證；只有真的使用的工具才寫工具名稱。
+- **測試結果**：只寫實際觀察到的結果、弱點、符合情形或不適用原因。
+- **攻擊條件**：Low 以上建議盡量補上攻擊者需要的存取位置、權限、使用者互動、實體接觸或其他必要條件。
+- **既有防護／限制條件**：只寫產品或場域已確認存在的控制、限制、使用情境或降低風險因素。
+- 沒有資料的段落可以保留標題後空白，不要為了格式完整而自行推測。
+- 不確定的產品能力、攻擊方式或防護措施不要補寫。
+- Low 以上若希望 AI 產生較合理的 CVSS，建議把實際攻擊條件與 C/I/A 影響寫清楚。
 
 ---
 
-## 9. 判定結果處理
+## 9. Report 產生規則
+
+目前 IoT 與 MASTG 兩支程式已統一 Report 寫作方式。
+
+### 9.1 第一個句子先交代測項目的／範圍
+
+英文 Report 第一個句子會優先使用類似：
+
+```text
+This test item evaluated ... for security vulnerabilities / security controls.
+```
+
+繁體中文 Report 第一個句子會優先使用類似：
+
+```text
+本測試項目針對……進行安全弱點評估／安全性評估。
+```
+
+第一句只用來交代「這個測項在評估什麼」，**不代表已執行某個特定工具、payload、掃描或攻擊**。
+
+第一句之後，才依 `目前情況` 描述：
+
+- 實際測試方式
+- 確認方式
+- 觀察結果
+- 弱點或風險
+- 攻擊條件
+- 既有防護／限制條件
+- 已提供的修補方向
+
+### 9.2 不得自行增加測試事實
+
+MASTG 測項名稱只代表「要檢查什麼」，不是已觀察到的弱點證據。IoT 亦同樣遵守此原則。
+
+AI 不得因測項名稱自行假設：
+
+- 使用了某套工具
+- 執行了某個 payload
+- 存在某種加密演算法或通訊協定
+- 已有某項安全控制
+- 成功完成某種攻擊
+
+### 9.3 固定結論
+
+Report 最後會保留與人工 `判定結果` 對應的結論；AI 不得自行升級或降低人工風險等級。
+
+---
+
+## 10. 判定結果處理
 
 程式可辨識：
 
@@ -327,7 +409,7 @@ Testing
 
 ---
 
-## 10. CVSS v3.1
+## 11. CVSS v3.1
 
 程式僅處理 CVSS v3.1 Base Metrics：
 
@@ -374,7 +456,7 @@ score = -
 
 ---
 
-## 11. 人工風險與 CVSS Severity 不一致
+## 12. 人工風險與 CVSS Severity 不一致
 
 人工風險判定與 CVSS Base Severity 是不同概念。
 
@@ -401,7 +483,7 @@ Low
 
 ---
 
-## 12. Security Recommendation
+## 13. Security Recommendation
 
 程式會建立或重建：
 
@@ -425,7 +507,7 @@ Security Recommendation
 
 ---
 
-## 13. MASTG 特別處理
+## 14. MASTG 特別處理
 
 `generate_mastg_report_ai.py` 會自動依工作表名稱辨識平台：
 
@@ -448,21 +530,51 @@ iOS App
 
 若 MASTG 測項名稱儲存在 Excel `HYPERLINK()` 公式中，程式會取出實際顯示名稱後再送給 AI，而不直接將整段公式作為測項名稱。
 
+對 MASVS 測項，程式可依工作表中的 MASVS Domain 標題進行分類彙整，並將平台與 Domain 資訊一起提供給 AI，以避免 Android / iOS 專有機制混用。
+
+若 `目前情況` 中明確寫有例如：
+
+```text
+參考 MI1
+參考 MA5
+Refer to S01
+```
+
+程式可把被引用測項的測項名稱、判定結果與目前情況一併提供給 AI 作為補充上下文，但不會用參考測項改變本列的人工判定結果。
+
 ---
 
-## 14. Ollama 執行狀態確認
+## 15. Excel 相容性與輸出格式
 
-使用地端 Ollama 時，可在模型主機確認：
+兩支程式皆會盡量保留來源 Excel 的既有格式，並處理以下項目：
+
+- x14 清單型 Data Validation 轉為標準 Data Validation
+- `Report` / `Report_ch` / `cvss` / `score` 文字自動換行
+- Report 欄位沿用中文 Report 欄位的基礎格式
+- Report 與 CVSS 輸出採 12pt
+- 依長文字內容自動調整列高
+- 人工風險與 CVSS Severity 不一致時，`cvss` / `score` 以紅字提醒
+
+---
+
+## 16. Ollama 執行狀態確認與問題排查
+
+### 16.1 確認 API 可連線
+
+Windows PowerShell：
+
+```powershell
+curl.exe http://192.168.50.241:11434/api/tags
+```
+
+若可正常回傳模型清單，代表 Windows 到 Ollama API 的基本網路連線正常。
+
+### 16.2 確認模型實際載入狀態
+
+Ollama 主機：
 
 ```bash
 ollama ps
-```
-
-目前建議看到類似：
-
-```text
-PROCESSOR   100% GPU
-CONTEXT     8192
 ```
 
 搭配：
@@ -471,13 +583,43 @@ CONTEXT     8192
 nvidia-smi
 ```
 
-確認 GPU Utilization、VRAM 與功耗是否正常。
+檢查：
+
+- `PROCESSOR` 是否大量 offload 到 CPU
+- `CONTEXT` 是否符合預期
+- VRAM 是否接近上限
+- GPU Utilization 是否正常
+
+### 16.3 目前環境的已知現象
+
+目前環境曾觀察：
+
+```text
+gemma4:31b-it-q8_0
+PROCESSOR  21%/79% CPU/GPU
+CONTEXT    262144
+```
+
+此時 31B Q8 推論速度會明顯下降，甚至造成 Python API timeout。
+
+同一套程式與 Ollama Server 改用：
+
+```text
+qwen2.5:14b
+```
+
+可正常且快速執行，因此目前日常批次作業建議先使用 `qwen2.5:14b`。
+
+若未來 Ollama 管理端能將 Server context 固定為較小值，再切回 `gemma4:31b-it-q8_0` 做品質優先的產出。
+
+### 16.4 程式啟動資訊
 
 程式執行時會顯示目前 Provider / Model / Host，例如：
 
 ```text
+[CONFIG] .env: D:\AutoReport_AI\.env
 [AI] Provider: ollama
-[AI] Model: gemma4:31b-it-q8_0
+[AI] Model: qwen2.5:14b
 [AI] Host: http://192.168.50.241:11434
 [AI] Context: 8192
 [AI] Thinking: false
@@ -486,12 +628,14 @@ nvidia-smi
 每次 Ollama 呼叫也會輸出效能資訊，例如：
 
 ```text
-[OLLAMA PERF] P06 | total: 8.4s | load: 0.3s | prompt: 1620 tokens | output: 180 tokens | 25.1 tok/s
+[OLLAMA PERF] S01 | total: 6.5s | load: 0.3s | prompt: 1500 tokens | output: 160 tokens | 24.0 tok/s
 ```
+
+> 啟動畫面中的 `[AI] Context: 8192` 代表程式準備送出的 request 設定；Ollama runner 實際採用的 context 請以 `ollama ps` 為準。
 
 ---
 
-## 15. `.gitignore` 建議
+## 17. `.gitignore` 建議
 
 建議至少包含：
 
@@ -501,6 +645,7 @@ venv/
 __pycache__/
 *.pyc
 *_report.xlsx
+*_template.xlsx
 backup/
 ```
 
@@ -508,7 +653,7 @@ backup/
 
 ---
 
-## 16. 資料安全提醒
+## 18. 資料安全提醒
 
 若使用 OpenAI / Gemini 等雲端 Provider，送往模型的內容可能包含：
 
@@ -531,7 +676,7 @@ backup/
 
 ---
 
-## 17. 使用原則
+## 19. 使用原則
 
 本工具定位為：
 
@@ -540,8 +685,9 @@ backup/
 正式交付前仍應由檢測人員確認：
 
 - 人工判定結果是否正確。
-- Report 是否忠實反映實際測試。
-- AI 是否誤解「目前情況」。
+- Report 第一個句子是否正確描述該測項的評估目的／範圍。
+- Report 是否忠實反映 `目前情況` 中的實際測試方式與結果。
+- AI 是否誤解攻擊條件或既有防護／限制條件。
 - CVSS Metrics 是否符合實際攻擊條件。
 - CVSS 與人工風險不一致是否有合理依據。
 - Recommendation 是否符合產品實際改善方向。
